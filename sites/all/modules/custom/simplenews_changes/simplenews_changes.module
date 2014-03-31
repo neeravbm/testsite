@@ -1,0 +1,622 @@
+<?php
+
+function simplenews_changes_menu() {
+  $items['simplenews-changes/save-user-preferences'] = array(
+    'title' => 'Update Newsletter Email Preferences',
+    'page callback' => 'simplenews_save_user_preferences_page',
+    'access callback' => TRUE,
+    'file' => 'user-subscription-preferences.inc',
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_menu_alter.
+ */
+function simplenews_changes_menu_alter(&$items) {
+  $items['admin/people/simplenews']['page arguments'] = array('simplenews_changes_admin_subscription');
+  $items['admin/people/simplenews']['file'] = 'simplenews_changes.admin.inc';
+  $items['admin/people/simplenews']['file path'] = drupal_get_path('module', 'simplenews_changes');
+}
+
+/**
+ * Add textarea field to config email content that will be sent to subscribed user
+ * Implements hook_form_FORM_ID_alter().
+ */
+function simplenews_changes_form_simplenews_admin_settings_subscription_alter(&$form, &$form_state) {
+
+  $form['subscription_mail']['post_notification'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('New blog post notification email'),
+    '#collapsible' => TRUE,
+    '#collapsed' => TRUE,
+  );
+
+  $form['subscription_mail']['post_notification']['simplenews_content_email_subject'] = array(
+    '#type' => 'textfield',
+    '#title' => t('subject line of new blog post notification email'),
+    '#default_value' => variable_get('simplenews_content_email_subject', 'New Post Published on [site:name]'),
+  );
+
+  $form['subscription_mail']['post_notification']['simplenews_content_email'] = array(
+    '#type' => 'textarea',
+    '#title' => t('body of new blog post notification email'),
+    '#default_value' => variable_get('simplenews_content_email', 'We have received a request to subscribe [simplenews-subscriber:mail] to the [simplenews-category:name]  newsletter on [site:name] website at [site:url]. However, this email is already subscribed to this newsletter. If you intended to unsubscribe please visit our site: [site:url]'),
+    '#format' => 'full_html',
+    '#rows' => 8
+  );
+}
+
+/**
+ * Implements hook_cron().
+ * Find all the nodes that are published but subscriber email has not been sent. Send the email and set email_sent field.
+ */
+function simplenews_changes_cron() {
+  _daily_subscriptions_send_email_cron();
+  _weekly_subscriptions_send_email_cron();
+}
+
+/**
+ * Make daily newsletter node and spool the node.
+ */
+function _daily_subscriptions_send_email_cron() {
+  $query = new EntityFieldQuery();
+  $query->entityCondition('entity_type', 'node')
+    ->entityCondition('bundle', 'post')
+    ->propertyCondition('status', 1)
+    ->fieldCondition('field_email_sent', 'value', 0, '=')
+    ->range(0, 10);
+  $result = $query->execute();
+
+  if (isset($result['node'])) {
+    $nids = array_keys($result['node']);
+    $nodes = node_load_multiple($nids);
+    foreach ($nodes as $nid => $node) {
+      simplenews_changes_create_and_send_daily_newsletter($node);
+      $node->field_email_sent[LANGUAGE_NONE][0]['value'] = 1;
+      node_save($node);
+    }
+  }
+}
+
+/**
+ * Make weekly newsletter node and spool the node.
+ */
+function _weekly_subscriptions_send_email_cron() {
+  $seconds = 604800;
+  $last_time_run = variable_get('simplenews_weekly_last_cron', 0);
+
+  if (!empty($last_time_run) && time() - $last_time_run <= $seconds) {
+    return;
+  }
+
+  //$timestamp = strtotime("-7 days");
+  $timestamp = $last_time_run;
+
+  $query = new EntityFieldQuery();
+  $query->entityCondition('entity_type', 'node')
+    ->entityCondition('bundle', 'post')
+    ->propertyCondition('status', 1)
+    ->propertyCondition('created', $timestamp, '>=');
+
+  $result = $query->execute();
+
+  if (isset($result['node'])) {
+    $nids = array_keys($result['node']);
+    $nodes = node_load_multiple($nids);
+    simplenews_changes_create_and_send_weekly_newsletter($nodes);
+  }
+
+  variable_set('simplenews_weekly_last_cron', time());
+}
+
+/**
+ * Creates and sends a newsletter for a specific node.
+ */
+function simplenews_changes_create_and_send_daily_newsletter($node) {
+  global $user;
+  // The node is being published. Send an email to all subscribers.
+  //subject of the new node
+  $subject = variable_get('simplenews_content_email_subject', 'New Post Published on [site:name]');
+  $subject = token_replace($subject, array('node' => $node));
+  $subject = str_replace("&#039;", "", $subject);
+  $body = token_replace(variable_get('simplenews_content_email', ''), array('node' => $node));
+  // First create a new newsletter node.
+  try {
+    $newsletter = (object) array(
+      'title' => $subject,
+      'body' => array(
+        LANGUAGE_NONE => array(
+          0 => array(
+            'value' => $body,
+            'safe_value' => $body,
+            'summary' => '',
+            'safe_summary' => '',
+            'format' => 'full_html',
+          ),
+        ),
+      ),
+      'type' => 'simplenews',
+      'status' => 1,
+      'field_simplenews_term' => array(
+        LANGUAGE_NONE => array(
+          0 => array(
+            'tid' => variable_get('simplenews_tid', ''),
+          ),
+        ),
+      ),
+      'is_new' => TRUE,
+      'language' => LANGUAGE_NONE,
+      'uid' => $user->uid,
+    );
+    node_object_prepare($newsletter);
+    node_save($newsletter);
+
+    // Send the newsletter immediately.
+    module_load_include('inc', 'simplenews', 'includes/simplenews.mail');
+
+    simplenews_add_daily_newsletter_to_spool($newsletter);
+    // Attempt to send immediately, if configured to do so.
+    $success = simplenews_mail_attempt_immediate_send(array('nid' => $newsletter->nid));
+    if ($success) {
+      drupal_set_message(t('Newsletter sent.'));
+    }
+    else {
+      drupal_set_message(t('Newsletter pending.'));
+    }
+
+  } catch (Exception $e) {
+    echo $e->getMessage();
+
+  }
+}
+
+/**
+ * Creates and sends weekly newsletter for users.
+ */
+function simplenews_changes_create_and_send_weekly_newsletter($nodes) {
+  global $user;
+
+  $site_name = variable_get('site_name', '');
+  $subject = t('New posts published on @site_name', array('@site_name' => $site_name));
+
+  $body = "<p>" . t("Dear eBay seller") . ",</p>";
+  $body .= "<p>" . t("Here's your weekly digest from the eBay for Business blog. Read each article online - and add your own comments. We look forward to hearing from you.") . "</p>";
+
+  foreach ($nodes as $nid => $node) {
+    $body .= theme('weekly_newsletter_node', array('node' => $node));
+  }
+
+  $body .= "<p>" . t("Thanks for reading!") . "</p>";
+  $body .= "<p>" . t("Best") . "</p>";
+  $body .= "<p>" . t("Jeremy Hainline") . "<br />" . t("Senior Editor") . "<br />" . t("eBay Marketplaces Marketing") . "</p>";
+
+  // First create a new newsletter node.
+  try {
+    $newsletter = (object) array(
+      'title' => $subject,
+      'body' => array(
+        LANGUAGE_NONE => array(
+          0 => array(
+            'value' => $body,
+            'safe_value' => $body,
+            'summary' => '',
+            'safe_summary' => '',
+            'format' => 'full_html',
+          ),
+        ),
+      ),
+      'type' => 'simplenews',
+      'status' => 1,
+      'field_simplenews_term' => array(
+        LANGUAGE_NONE => array(
+          0 => array(
+            'tid' => variable_get('simplenews_tid', ''),
+          ),
+        ),
+      ),
+      'is_new' => TRUE,
+      'language' => LANGUAGE_NONE,
+      'uid' => $user->uid,
+    );
+    node_object_prepare($newsletter);
+    node_save($newsletter);
+
+    // Send the newsletter immediately.
+    module_load_include('inc', 'simplenews', 'includes/simplenews.mail');
+
+    simplenews_add_weekly_newsletter_to_spool($newsletter);
+    // Attempt to send immediatly, if configured to do so.
+    $success = simplenews_mail_attempt_immediate_send(array('nid' => $newsletter->nid));
+    if ($success) {
+      drupal_set_message(t('Newsletter sent.'));
+    }
+    else {
+      drupal_set_message(t('Newsletter pending.'));
+    }
+  } catch (Exception $e) {
+    watchdog('simplenews_changes', $e->getMessage());
+  }
+}
+
+/**
+ * Implements hook_node_presave().
+ */
+function simplenews_changes_node_presave($node) {
+  if ($node->type == 'post' && $node->status == 1) {
+    // See if the status was 0 before.
+    $old_status = db_select('node_revision', 'nr')
+      ->condition('nr.nid', $node->nid)
+      ->fields('nr', array('vid'))
+      ->condition('nr.status', 1)
+      ->execute()
+      ->fetchField();
+  }
+}
+
+
+/**
+ * Implements hook_theme().
+ */
+function simplenews_changes_theme() {
+  return array(
+    'weekly_newsletter_node' => array(
+      'variables' => array(
+        'node' => NULL,
+      ),
+      'template' => 'weekly_newsletter_node',
+      'path' => drupal_get_path('module', 'simplenews_changes'),
+    ),
+  );
+}
+
+
+/**
+ * Implements hook_process_simplenews_newsletter_footer().
+ */
+/*function simplenews_changes_process_simplenews_newsletter_footer(&$vars) {
+	$vars['unsubscribe_text'] = t('Unsubscribe from this blog alert.');
+	$vars['build']['field_simplenews_term']['#access'] = FALSE;
+}*/
+
+/**
+ * Implements hook_theme_registry_alter().
+ */
+function simplenews_changes_theme_registry_alter(&$theme_registry) {
+  if (!empty($theme_registry['simplenews_newsletter_body'])) {
+    $theme_registry['simplenews_newsletter_body']['path'] = drupal_get_path('module', 'simplenews_changes');
+  }
+  if (!empty($theme_register['htmlmail__simplenews'])) {
+    $theme_registry['htmlmail__simplenews']['path'] = drupal_get_path('module', 'simplenews_changes');
+    $theme_registry['htmlmail__simplenews']['theme path'] = drupal_get_path('module', 'simplenews_changes');
+  }
+  /*
+  if (!empty($theme_registry['simplenews_newsletter_footer'])) {
+      $theme_registry['simplenews_newsletter_footer']['path'] = drupal_get_path('module', 'simplenews_changes');
+  }
+  */
+}
+
+/**
+ * Implements hook_token_info().
+ */
+function simplenews_changes_token_info() {
+  $node['email-body'] = array(
+    'name' => t('Email body'),
+    'description' => t('Content to be sent in the email. Following is selected: Excerpt, Body Summary, Body Trimmed.'),
+  );
+
+  $node['email-body-summary'] = array(
+    'name' => t('Email body summary'),
+    'description' => t('Summary of content to be sent in the email. Following is selected: Excerpt, Body Summary, Body Trimmed.'),
+  );
+
+  $node['email-image'] = array(
+    'name' => t('Email image'),
+    'description' => t('Image to be sent in the email.'),
+  );
+
+  $node['logo'] = array(
+    'name' => t('logo image'),
+    'description' => t('Logo image to be sent in the email.'),
+  );
+
+  $node['node-url'] = array(
+    'name' => t('Node url'),
+    'description' => t('Node Url.'),
+  );
+
+  return array(
+    'tokens' => array('node' => $node),
+  );
+}
+
+/**
+ * Implements hook_tokens().
+ */
+function simplenews_changes_tokens($type, $tokens, array $data = array(), array $options = array()) {
+  global $base_url;
+  $url_options = array('absolute' => TRUE);
+  $replacements = array();
+  if ($type == 'node' && !empty($data['node'])) {
+    $node = $data['node'];
+    foreach ($tokens as $name => $original) {
+      switch ($name) {
+        case 'email-body':
+
+          $field_excerpt = field_get_items('node', $node, 'field_excerpt');
+          $body_field = field_get_items('node', $node, 'body');
+
+          if (!empty($field_excerpt[0]['value'])) {
+            $value = $field_excerpt[0]['value'];
+            $replacements[$original] = $value;
+          }
+
+          else {
+            if (!empty($body_field[0]['summary'])) {
+              $replacements[$original] = $body_field[0]['summary'];
+            }
+
+            else {
+              if (!empty($body_field[0]['value'])) {
+                $replacements[$original] = text_summary(strip_tags($body_field[0]['value']), 'full_html', 200);
+              }
+            }
+          }
+
+          break;
+
+        case 'email-body-summary':
+
+          $field_excerpt = field_get_items('node', $node, 'field_excerpt');
+          $body_field = field_get_items('node', $node, 'body');
+
+          if (!empty($field_excerpt[0]['value'])) {
+            $value = $field_excerpt[0]['value'];
+            $body_value = views_trim_text(array(
+              'html' => TRUE,
+              'max_length' => 200,
+              'ellipsis' => TRUE,
+            ), strip_tags($value));
+            $replacements[$original] = $body_value;
+          }
+
+          else {
+            if (!empty($body_field[0]['summary'])) {
+              $replacements[$original] = $body_field[0]['summary'];
+              $replacements[$original] = views_trim_text(array(
+                'html' => TRUE,
+                'max_length' => 200,
+                'ellipsis' => TRUE,
+              ), strip_tags($replacements[$original]));
+            }
+
+            else {
+              if (!empty($body_field[0]['value'])) {
+                $replacements[$original] = text_summary(strip_tags($body_field[0]['value']), 'full_html', 200);
+              }
+            }
+          }
+
+          break;
+
+        case 'email-image':
+          $field_secondary = field_get_items('node', $node, 'field_secondary_image');
+          if (!empty($field_secondary[0]['filename'])) {
+            $filename = $field_secondary[0]['filename'];
+            $path = $base_url . '/sites/default/files/' . $field_secondary[0]['filename'];
+            //$node_path = $base_url.'/?q=node/'.$node->nid;
+            $replacements[$original] = '<img src="' . $path . '"/>';
+          }
+
+          break;
+
+        case 'logo':
+          $replacements[$original] = theme('image', array('path' => theme_get_setting('logo')));
+          break;
+
+        case 'node-url':
+          $replacements[$original] = url("node/$node->nid", $url_options); //$base_url.'/?q=node/'.$node->nid;
+          break;
+
+      }
+    }
+  }
+  return $replacements;
+}
+
+/**
+ * Implements hook_form_alter().
+ */
+function simplenews_changes_form_alter(&$form, $form_state, $form_id) {
+  global $user;
+
+  if (strncmp($form_id, "simplenews_block_form_", 22) == 0) {
+    $form['weekly_update'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Send weekly update instead of daily'),
+      '#weight' => 0,
+    );
+
+    $form['#submit'][] = "simplenews_save_user_preferences";
+  }
+}
+
+/**
+ * Submit handler for save user preferences
+ */
+function simplenews_save_user_preferences($form, $form_state) {
+  $values = (object) $form_state['values'];
+
+  if (!isset($values->weekly_update)) {
+    return;
+  }
+
+  $snid = simplenews_changes_get_subscriber_id_using_mail($values->mail);
+
+  db_merge('simplenews_changes_user_preferences')
+    ->key(array('snid' => $snid))
+    ->fields(array(
+      'weekly' => $values->weekly_update,
+    ))
+    ->execute();
+}
+
+function simplenews_changes_mail_alter(&$message) {
+  if ($message['id'] == 'simplenews_node') {
+    $mail = $message['to'];
+    $uid = 0;
+    if ($account = user_load_by_mail($mail)) {
+      $uid = $account->uid;
+    }
+    $hash_string = md5($mail . '-' . $uid);
+    $link = l(t('click here'), 'simplenews-changes/save-user-preferences', array(
+      'query' => array(
+        'mail' => $mail,
+        'hash_code' => $hash_string
+      ),
+      'absolute' => TRUE
+    ));
+    $message['body'][] = "--\n" . t('Change email preferences: ') . $link;
+  }
+}
+
+function simplenews_add_daily_newsletter_to_spool($node) {
+  // To send the newsletter, the node id and target email addresses
+  // are stored in the spool.
+  // Only subscribed recipients are stored in the spool (status = 1).
+  // Only daily subscribed user will be consider
+  $select = db_select('simplenews_subscriber', 's');
+  $select->innerJoin('simplenews_subscription', 't', 's.snid = t.snid');
+  $select->leftJoin('simplenews_changes_user_preferences', 'p', 's.snid = p.snid');
+  $select->addField('s', 'mail');
+  $select->addField('s', 'snid');
+  $select->addField('t', 'tid');
+  $select->addExpression($node->nid, 'nid');
+  $select->addExpression(SIMPLENEWS_SUBSCRIPTION_STATUS_SUBSCRIBED, 'status');
+  $select->addExpression(REQUEST_TIME, 'timestamp');
+  $select->condition('t.tid', $node->simplenews->tid);
+  $select->condition('t.status', SIMPLENEWS_SUBSCRIPTION_STATUS_SUBSCRIBED);
+  $select->condition('s.activated', SIMPLENEWS_SUBSCRIPTION_ACTIVE);
+  $select->where('p.weekly IS NULL OR p.weekly =0');
+  // $select->condition('s.weekly',0);
+
+  db_insert('simplenews_mail_spool')
+    ->from($select)
+    ->execute();
+
+  // Update simplenews newsletter status to send pending.
+  simplenews_newsletter_update_sent_status($node);
+
+  // Notify other modules that a newsletter was just spooled.
+  module_invoke_all('simplenews_spooled', $node);
+}
+
+function simplenews_add_weekly_newsletter_to_spool($node) {
+  // To send the newsletter, the node id and target email addresses
+  // are stored in the spool.
+  // Only subscribed recipients are stored in the spool (status = 1).
+  // Only weekly subscribed user will be consider
+  $select = db_select('simplenews_subscriber', 's');
+  $select->innerJoin('simplenews_subscription', 't', 's.snid = t.snid');
+  $select->leftJoin('simplenews_changes_user_preferences', 'p', 's.snid = p.snid');
+  $select->addField('s', 'mail');
+  $select->addField('s', 'snid');
+  $select->addField('t', 'tid');
+  $select->addExpression($node->nid, 'nid');
+  $select->addExpression(SIMPLENEWS_SUBSCRIPTION_STATUS_SUBSCRIBED, 'status');
+  $select->addExpression(REQUEST_TIME, 'timestamp');
+  $select->condition('t.tid', $node->simplenews->tid);
+  $select->condition('t.status', SIMPLENEWS_SUBSCRIPTION_STATUS_SUBSCRIBED);
+  $select->condition('s.activated', SIMPLENEWS_SUBSCRIPTION_ACTIVE);
+  $select->condition('p.weekly', 1);
+
+  db_insert('simplenews_mail_spool')
+    ->from($select)
+    ->execute();
+
+  // Update simplenews newsletter status to send pending.
+  simplenews_newsletter_update_sent_status($node);
+
+  // Notify other modules that a newsletter was just spooled.
+  module_invoke_all('simplenews_spooled', $node);
+}
+
+function simplenews_changes_get_subscriber_id_using_mail($mail) {
+  return db_query("SELECT snid from {simplenews_subscriber} WHERE mail =:mail ", array(':mail' => $mail))->fetchField();
+}
+
+function simplenews_changes_preprocess_weekly_newsletter_node(&$vars) {
+  $vars['body_value'] = '';
+  $vars['image'] = '';
+
+  $node = $vars['node'];
+  if (is_null($node)) {
+    return;
+  }
+
+  $body_value = '';
+  $field_excerpt = field_get_items('node', $node, 'field_excerpt');
+  $body_field = field_get_items('node', $node, 'body');
+
+  if (!empty($field_excerpt[0]['value'])) {
+    $value = $field_excerpt[0]['value'];
+    $body_value = views_trim_text(array('html' => TRUE, 'max_length' => 200, 'ellipsis' => TRUE,), strip_tags($value));
+  }
+  else {
+    if (!empty($body_field[0]['summary'])) {
+      $body_value = $body_field[0]['summary'];
+      $body_value = views_trim_text(array(
+        'html' => TRUE,
+        'max_length' => 200,
+        'ellipsis' => TRUE,
+      ), strip_tags($body_value));
+    }
+    else {
+      if (!empty($body_field[0]['value'])) {
+        $body_value = text_summary(strip_tags($body_field[0]['value']), 'full_html', 200);
+      }
+    }
+  }
+  $vars['body_value'] = $body_value;
+
+  $image = '';
+  $field_secondary = field_get_items('node', $node, 'field_secondary_image');
+  global $base_url;
+  if (!empty($field_secondary[0]['filename'])) {
+    $filename = $field_secondary[0]['filename'];
+    $path = $base_url . '/sites/default/files/' . $field_secondary[0]['filename'];
+    $image = '<img src="' . $path . '" />';
+  }
+  $vars['image'] = $image;
+
+  $vars['link'] = $base_url . '/node/' . $node->nid;
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ */
+function simplenews_changes_form_simplenews_admin_settings_newsletter_alter(&$form, &$form_state) {
+  $form['simplenews_tid'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Term id of the newsletter'),
+    '#size' => 6,
+    '#description' => t('Term id of the newsletter that has to be sent whenever a new post is published.'),
+    '#default_value' => variable_get('simplenews_tid', ''),
+  );
+}
+
+/**
+ * Implements hook_module_implements_alter().
+ */
+function simplenews_changes_module_implements_alter(&$implementations, $hook) {
+  if ($hook == 'mail_alter') {
+    // Make sure that if simplenews_statistics is present, then it comes after simplenews_changes.
+    if (!empty($implementations['simplenews_statistics'])) {
+      $group = $implementations['simplenews_statistics'];
+      unset($implementations['simplenews_statistics']);
+      $implementations['simplenews_statistics'] = $group;
+    }
+  }
+}

@@ -1,0 +1,145 @@
+<?php
+
+/**
+ * Implements hook_schema().
+ */
+function simplenews_changes_schema() {
+  $schema = get_simplenews_changes_schema();
+  return $schema;
+}
+
+
+function get_simplenews_changes_schema() {
+
+  $t = get_t();
+
+  $schema['simplenews_changes_user_preferences'] = array(
+    'description' => $t("Table to store user's newsletter preference."),
+    'fields' => array(
+      'snid' => array(
+        'description' => $t('User subscription id'),
+        'type' => 'serial',
+        'not null' => TRUE,
+      ),
+      'weekly' => array(
+        'description' => $t('TODO: please describe this field!'),
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'primary key' => array('snid'),
+    'indexes' => array(
+      'weekly_snid' => array('weekly', 'snid'),
+    ),
+    'foreign keys' => array(
+      'simplenews_subscriber' => array(
+        'table' => 'simplenews_subscriber',
+        'snid' => array('snid'),
+      )
+    )
+  );
+
+  return $schema;
+}
+
+
+/**
+ * Create flag for subscription type weekly on/off
+ */
+function simplenews_changes_update_7001() {
+
+  db_add_field('simplenews_subscriber', 'weekly', array(
+    'description' => 'Weekly subscription flag',
+    'type' => 'int',
+    'not null' => TRUE,
+    'default' => 0,
+  ));
+}
+
+/**
+ * Create simplenews_changes_user_preferences table and drop weekly from simplenews_subscriber
+ */
+function simplenews_changes_update_7002() {
+  $schema = get_simplenews_changes_schema_7002();
+
+  $name = 'simplenews_changes_user_preferences';
+
+  if (!db_table_exists($name)) {
+    db_create_table($name, $schema['simplenews_changes_user_preferences']);
+  }
+
+  db_drop_field("simplenews_subscriber", 'weekly');
+}
+
+
+function get_simplenews_changes_schema_7002() {
+
+  $t = get_t();
+
+  $schema['simplenews_changes_user_preferences'] = array(
+    'description' => $t("Table to store user's newsletter preference."),
+    'fields' => array(
+      'id' => array(
+        'description' => $t('TODO: please describe this field!'),
+        'type' => 'serial',
+        'not null' => TRUE,
+      ),
+      'uid' => array(
+        'description' => $t('TODO: please describe this field!'),
+        'type' => 'int',
+        'not null' => TRUE,
+      ),
+      'weekly' => array(
+        'description' => $t('TODO: please describe this field!'),
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'primary key' => array('id'),
+  );
+
+  return $schema;
+}
+
+
+/**
+ * Add email id field with simplenews_changes_user_preferences
+ */
+function simplenews_changes_update_7003() {
+  db_drop_field("simplenews_changes_user_preferences", 'uid');
+  db_drop_field("simplenews_changes_user_preferences", 'id');
+
+  db_add_field('simplenews_changes_user_preferences', 'mail', array(
+    'type' => 'varchar',
+    'length' => 255,
+    'not null' => TRUE,
+  ));
+
+  db_add_field('simplenews_changes_user_preferences', 'created', array(
+    'description' => 'UNIX timestamp of when the user is (un)subscribed.',
+    'type' => 'int',
+    'unsigned' => TRUE,
+    'not null' => TRUE,
+    'default' => 0,
+  ));
+}
+
+/**
+ * Add snid field with simplenews_changes_user_preferences
+ */
+function simplenews_changes_update_7004() {
+  $t = get_t();
+
+  db_add_field('simplenews_changes_user_preferences', 'snid', array(
+    'description' => $t('User Subscription Id'),
+    'type' => 'int',
+    'not null' => TRUE,
+    'default' => 0,
+  ));
+
+  db_drop_field("simplenews_changes_user_preferences", 'mail');
+  db_drop_field("simplenews_changes_user_preferences", 'created');
+  db_add_index('simplenews_changes_user_preferences', 'weekly_snid', array('weekly', 'snid'));
+}

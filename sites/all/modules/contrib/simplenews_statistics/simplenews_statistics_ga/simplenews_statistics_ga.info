@@ -1,0 +1,14 @@
+name = "Simplenews Statistics Google Analytics"
+description = "Integrates Google Anaytics with Simplenews Statistics."
+dependencies[] = simplenews_statistics
+dependencies[] = googleanalytics
+configure = admin/config/services/simplenews/statistics/ga
+package = Statistics
+core = 7.x
+
+; Information added by drupal.org packaging script on 2013-10-01
+version = "7.x-1.x-dev"
+core = "7.x"
+project = "simplenews_statistics"
+datestamp = "1380628143"
+

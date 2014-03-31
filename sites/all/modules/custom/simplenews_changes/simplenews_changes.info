@@ -1,0 +1,5 @@
+name = Simplenews Changes
+description = Changes related to simplenews.
+package = Custom
+core = 7.x
+files[] = simplenews_changes.module
